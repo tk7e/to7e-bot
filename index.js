@@ -30,9 +30,16 @@ const TOKEN     = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID || "1482952567179837541";
 if (!TOKEN) { console.error("❌ TOKEN غير موجود! ضعه في متغيرات البيئة."); process.exit(1); }
 
-// ── Client + Streamer ─────────────────────────────────────────────────────────
-const client   = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
-const streamer = new Streamer(client);
+// ── Client ───────────────────────────────────────────────────────────────────
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
+
+// Streamer is created ON-DEMAND only for film/series streaming
+// Creating it globally conflicts with @discordjs/voice voice connection
+let streamer = null;
+function getStreamer() {
+    if (!streamer) streamer = new Streamer(client);
+    return streamer;
+}
 
 // ── Per-guild state ───────────────────────────────────────────────────────────
 const servers = new Map();
@@ -175,10 +182,10 @@ async function connectVoice(interaction) {
         if (s.connection.joinConfig.channelId === ch.id) return s.connection;
         s.connection.destroy();
     }
-    s.connection  = joinVoiceChannel({ channelId: ch.id, guildId: interaction.guildId, adapterCreator: interaction.guild.voiceAdapterCreator, selfDeaf: true });
+    s.connection  = joinVoiceChannel({ channelId: ch.id, guildId: interaction.guildId, adapterCreator: interaction.guild.voiceAdapterCreator, selfDeaf: false, selfMute: false });
     s.lastChannel = interaction.channel;
-    try { await entersState(s.connection, VoiceConnectionStatus.Ready, 20_000); }
-    catch { s.connection.destroy(); s.connection = null; throw new Error("فشل الاتصال بالروم الصوتي."); }
+    try { await entersState(s.connection, VoiceConnectionStatus.Ready, 30_000); }
+    catch (e) { console.error("connectVoice error:", e?.message || e); s.connection.destroy(); s.connection = null; throw new Error("فشل الاتصال بالروم الصوتي."); }
     resetInactiveTimer(interaction.guildId);  // start 3-min countdown
     return s.connection;
 }
@@ -249,7 +256,7 @@ async function streamMedia(interaction, videoId, isSeries = false) {
 
     // Stop previous stream
     if (s.streamStopper) { try { s.streamStopper(); } catch {} s.streamStopper = null; }
-    if (s.streaming)     { try { await streamer.stopStream(); } catch {} s.streaming = false; }
+    if (s.streaming)     { try { await getStreamer().stopStream(); } catch {} s.streaming = false; }
 
     const url = `https://www.youtube.com/watch?v=${videoId}`;
     await interaction.followUp({ content: "⏳ جاري جلب معلومات البث..." });
@@ -290,7 +297,7 @@ async function streamMedia(interaction, videoId, isSeries = false) {
     else          await interaction.channel.send("⚠️ لا تتوفر ترجمة عربية.");
 
     // Join voice via discord-video-stream
-    try { await streamer.joinVoice(interaction.guildId, voiceCh.id); }
+    try { await getStreamer().joinVoice(interaction.guildId, voiceCh.id); }
     catch (e) { throw new Error(`فشل الانضمام للروم: ${e.message}`); }
 
     s.streaming = true;
@@ -312,7 +319,7 @@ async function streamMedia(interaction, videoId, isSeries = false) {
 
     // Use v5 API: playStream(input, streamer, options)
     try {
-        await playStream(ffProc.stdout, streamer, {
+        await playStream(ffProc.stdout, getStreamer(), {
             width:                      1280,
             height:                     720,
             frameRate:                  30,
@@ -538,7 +545,7 @@ async function handleCmd(i) {
         const s = getServer(i.guildId);
         if (!s.streaming && !s.streamStopper) return i.reply({ content: "❌ لا يوجد بث يشتغل.", ephemeral: true });
         if (s.streamStopper) { s.streamStopper(); s.streamStopper = null; }
-        s.streaming = false; try { await streamer.stopStream(); } catch {}
+        s.streaming = false; try { await getStreamer().stopStream(); } catch {}
         return i.reply("🛑 تم إيقاف البث.");
     }
 
@@ -600,7 +607,7 @@ async function handleBtn(i) {
     if (id.startsWith("stopstream_")) {
         const s = getServer(i.guildId);
         if (s.streamStopper) { s.streamStopper(); s.streamStopper = null; }
-        s.streaming = false; try { await streamer.stopStream(); } catch {}
+        s.streaming = false; try { await getStreamer().stopStream(); } catch {}
         return i.reply("🛑 تم إيقاف البث.");
     }
 
@@ -620,10 +627,18 @@ async function handleBtn(i) {
     if (id==="hn")  { s.current ? i.reply({embeds:[musicEmbed(s.current,"يشغل الآن 🎵")],ephemeral:true}) : i.reply({content:"❌ لا شيء.",ephemeral:true}); }
     if (id==="hss") {
         if (s.streamStopper) { s.streamStopper(); s.streamStopper=null; }
-        s.streaming=false; try{await streamer.stopStream();}catch{}
+        s.streaming=false; try{await getStreamer().stopStream();}catch{}
         i.reply({content:"🛑 تم.",ephemeral:true});
     }
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
-client.login(TOKEN);
+// libsodium-wrappers MUST be awaited before any voice connection
+const sodium = require("libsodium-wrappers");
+sodium.ready.then(() => {
+    console.log("✅ sodium ready");
+    client.login(TOKEN);
+}).catch(e => {
+    console.error("❌ sodium init failed:", e);
+    process.exit(1);
+});
