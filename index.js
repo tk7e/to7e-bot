@@ -182,10 +182,24 @@ async function connectVoice(interaction) {
         if (s.connection.joinConfig.channelId === ch.id) return s.connection;
         s.connection.destroy();
     }
-    s.connection  = joinVoiceChannel({ channelId: ch.id, guildId: interaction.guildId, adapterCreator: interaction.guild.voiceAdapterCreator, selfDeaf: false, selfMute: false });
+    s.connection  = joinVoiceChannel({ channelId: ch.id, guildId: interaction.guildId, adapterCreator: interaction.guild.voiceAdapterCreator, selfDeaf: true });
     s.lastChannel = interaction.channel;
+
+    // Log every state change to diagnose the failure
+    s.connection.on("stateChange", (oldState, newState) => {
+        console.log(`[Voice] ${oldState.status} → ${newState.status}`);
+        if (newState.status === VoiceConnectionStatus.Disconnected) {
+            console.log(`[Voice] Disconnect reason:`, newState.reason, "closeCode:", newState.closeCode);
+        }
+    });
+
     try { await entersState(s.connection, VoiceConnectionStatus.Ready, 30_000); }
-    catch (e) { console.error("connectVoice error:", e?.message || e); s.connection.destroy(); s.connection = null; throw new Error("فشل الاتصال بالروم الصوتي."); }
+    catch (e) {
+        console.error("connectVoice error:", e?.message || e, "| state:", s.connection?.state?.status);
+        s.connection.destroy();
+        s.connection = null;
+        throw new Error("فشل الاتصال بالروم الصوتي.");
+    }
     resetInactiveTimer(interaction.guildId);  // start 3-min countdown
     return s.connection;
 }
